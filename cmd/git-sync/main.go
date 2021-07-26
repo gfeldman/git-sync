@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"io"
 	"io/ioutil"
 	"net"
@@ -45,6 +46,10 @@ import (
 	"github.com/spf13/pflag"
 	"k8s.io/git-sync/pkg/pid1"
 	"k8s.io/git-sync/pkg/version"
+
+
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 )
 
 var flVer = flag.Bool("version", false, "print the version and exit")
@@ -104,6 +109,8 @@ var flSSH = flag.Bool("ssh", envBool("GIT_SYNC_SSH", false),
 	"use SSH for git operations")
 var flSSHKeyFile = flag.String("ssh-key-file", envString("GIT_SSH_KEY_FILE", "/etc/git-secret/ssh"),
 	"the SSH key to use")
+var flSecretManagerKey = flag.String("secret-manager-key", envString("GIT_SSH_SECRET_MANAGER_KEY",""),"The secret manager key to get the ssk key from")
+
 var flSSHKnownHosts = flag.Bool("ssh-known-hosts", envBool("GIT_KNOWN_HOSTS", true),
 	"enable SSH known_hosts verification")
 var flSSHKnownHostsFile = flag.String("ssh-known-hosts-file", envString("GIT_SSH_KNOWN_HOSTS_FILE", "/etc/git-secret/known_hosts"),
@@ -464,6 +471,11 @@ func main() {
 		}
 	}
 
+	if *flSecretManagerKey != "" {
+		if err := getSSHFromSecretStore(); err != nil {
+			handleError(false,"Error: can't get secret from secret store: %v", err)
+		}
+	}
 	if *flSSH {
 		if err := setupGitSSH(*flSSHKnownHosts); err != nil {
 			handleError(false, "ERROR: can't configure SSH: %v", err)
@@ -1117,7 +1129,39 @@ func setupGitAuth(ctx context.Context, username, password, gitURL string) error 
 
 	return nil
 }
+func ensureDir(fileName string) {
+	dirName := filepath.Dir(fileName)
+	if _, serr := os.Stat(dirName); serr != nil {
+		merr := os.MkdirAll(dirName, os.ModePerm)
+		if merr != nil {
+			panic(merr)
+		}
+	}
+}
+func getSSHFromSecretStore() error {
+	var secretManagerKey = *flSecretManagerKey
+	cfg, err := config.LoadDefaultConfig(context.TODO())
 
+	svc :=secretsmanager.NewFromConfig(cfg)
+
+	input := &secretsmanager.GetSecretValueInput{
+		SecretId:     aws.String(secretManagerKey),
+		VersionStage: aws.String("AWSCURRENT"),
+	}
+	result, err := svc.GetSecretValue(context.TODO(),input)
+	if err != nil {
+		return err
+	}
+	dirParts := strings.Split(*flSSHKeyFile, "/")
+	dirName :=  strings.Join(dirParts[0:(len(dirParts)-1)],"/")
+	if err := os.MkdirAll(dirName, os.ModePerm); err != nil {
+		return err
+	}
+	if err = ioutil.WriteFile(*flSSHKeyFile, []byte(*result.SecretString), 0600); err != nil {
+		return err
+	}
+	return nil
+}
 func setupGitSSH(setupKnownHosts bool) error {
 	log.V(1).Info("setting up git SSH credentials")
 
